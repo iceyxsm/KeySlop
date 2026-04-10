@@ -1,0 +1,19 @@
+[package]
+name = "keyslop"
+version = "0.1.0"
+edition = "2021"
+description = "A cross-platform keyboard soundboard — assign custom sounds to any key"
+
+[dependencies]
+eframe = "0.31"
+rdev = "0.5"
+rodio = "0.20"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+rfd = "0.15"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
