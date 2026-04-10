@@ -1,4 +1,4 @@
 /target
 Cargo.lock
-*.exe
 *.pdb
+.kiro
