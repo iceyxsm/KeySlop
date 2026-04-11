@@ -18,8 +18,6 @@ pub struct KeySlopApp {
     filter_text: String,
     available_devices: Vec<String>,
     tray: Option<AppTray>,
-    /// Whether the app should actually quit (vs just hide).
-    should_quit: bool,
     /// Whether the window is currently visible.
     window_visible: bool,
 }
@@ -64,7 +62,6 @@ impl KeySlopApp {
             filter_text: String::new(),
             available_devices,
             tray,
-            should_quit: false,
             window_visible: true,
         }
     }
@@ -126,17 +123,24 @@ impl KeySlopApp {
     }
 
     fn process_tray_events(&mut self, ctx: &egui::Context) {
+        // Collect events first to avoid borrow issues
+        let mut messages = Vec::new();
         if let Some(ref tray) = self.tray {
             while let Some(msg) = tray.poll() {
-                match msg {
-                    TrayMessage::Show => {
-                        self.window_visible = true;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                    }
-                    TrayMessage::Quit => {
-                        self.should_quit = true;
-                    }
+                messages.push(msg);
+            }
+        }
+
+        for msg in messages {
+            match msg {
+                TrayMessage::Show => {
+                    self.window_visible = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                TrayMessage::ToggleEnabled => {
+                    self.config.enabled = !self.config.enabled;
+                    self.save_config();
                 }
             }
         }
@@ -149,13 +153,7 @@ impl eframe::App for KeySlopApp {
         self.process_key_events();
         self.process_tray_events(ctx);
 
-        // Handle quit from tray
-        if self.should_quit {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            return;
-        }
-
-        // Intercept window close: hide instead of quit
+        // Handle close: always hide, never quit
         if ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -171,10 +169,6 @@ impl eframe::App for KeySlopApp {
                 ui.separator();
                 ui.label(format!("Last key: {}", self.last_key));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Quit button (actually quits)
-                    if ui.button("Quit").clicked() {
-                        self.should_quit = true;
-                    }
                     let toggle_text = if self.config.enabled {
                         "Enabled"
                     } else {
