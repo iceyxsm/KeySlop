@@ -44,10 +44,10 @@ pub struct AudioPlayer {
     _stream: OutputStream,
     stream_handle: OutputStreamHandle,
     volume: Arc<Mutex<f32>>,
-    /// Active sinks for polyphony management.
+    /// Active sinks for polyphony management. Uses Vec for simpler cleanup.
     active_sinks: Mutex<VecDeque<Sink>>,
     /// Max simultaneous sounds.
-    max_polyphony: Mutex<usize>,
+    max_polyphony: Arc<Mutex<usize>>,
     /// Current device name.
     device_name: Mutex<String>,
 }
@@ -68,7 +68,7 @@ impl AudioPlayer {
             stream_handle,
             volume: Arc::new(Mutex::new(1.0)),
             active_sinks: Mutex::new(VecDeque::new()),
-            max_polyphony: Mutex::new(DEFAULT_MAX_POLYPHONY),
+            max_polyphony: Arc::new(Mutex::new(DEFAULT_MAX_POLYPHONY)),
             device_name: Mutex::new(device_name),
         })
     }
@@ -86,7 +86,7 @@ impl AudioPlayer {
             stream_handle,
             volume: Arc::new(Mutex::new(1.0)),
             active_sinks: Mutex::new(VecDeque::new()),
-            max_polyphony: Mutex::new(DEFAULT_MAX_POLYPHONY),
+            max_polyphony: Arc::new(Mutex::new(DEFAULT_MAX_POLYPHONY)),
             device_name: Mutex::new(name.to_string()),
         })
     }
@@ -110,26 +110,6 @@ impl AudioPlayer {
         }
     }
 
-    pub fn max_polyphony(&self) -> usize {
-        self.max_polyphony.lock().map(|m| *m).unwrap_or(DEFAULT_MAX_POLYPHONY)
-    }
-
-    /// Clean up finished sinks and enforce polyphony limit.
-    fn enforce_polyphony(&self) {
-        if let Ok(mut sinks) = self.active_sinks.lock() {
-            // Remove finished sinks
-            sinks.retain(|sink| !sink.empty());
-
-            // If still over limit, stop the oldest ones
-            let max = self.max_polyphony.lock().map(|m| *m).unwrap_or(DEFAULT_MAX_POLYPHONY);
-            while sinks.len() >= max {
-                if let Some(old_sink) = sinks.pop_front() {
-                    old_sink.stop();
-                }
-            }
-        }
-    }
-
     /// Play a sound file. Non-blocking with polyphony limiting.
     pub fn play(&self, path: &str) -> Result<(), String> {
         let file_path = Path::new(path);
@@ -137,15 +117,35 @@ impl AudioPlayer {
             return Err(format!("Sound file not found: {}", path));
         }
 
-        // Enforce polyphony before creating new sink
-        self.enforce_polyphony();
+        // Read max polyphony first (separate lock)
+        let max = self
+            .max_polyphony
+            .lock()
+            .map(|m| *m)
+            .unwrap_or(DEFAULT_MAX_POLYPHONY);
 
+        // Clean up and enforce polyphony
+        if let Ok(mut sinks) = self.active_sinks.lock() {
+            // Remove sinks that have finished playing
+            sinks.retain(|sink| !sink.empty() || sink.len() > 0);
+
+            // Stop oldest sounds if we're at the limit
+            while sinks.len() >= max {
+                if let Some(old_sink) = sinks.pop_front() {
+                    old_sink.stop();
+                    drop(old_sink);
+                }
+            }
+        }
+
+        // Decode the audio
         let file =
             File::open(file_path).map_err(|e| format!("Failed to open sound file: {}", e))?;
         let reader = BufReader::new(file);
         let source =
             Decoder::new(reader).map_err(|e| format!("Failed to decode sound file: {}", e))?;
 
+        // Create sink and play
         let sink = Sink::try_new(&self.stream_handle)
             .map_err(|e| format!("Failed to create audio sink: {}", e))?;
 
@@ -153,10 +153,11 @@ impl AudioPlayer {
         sink.set_volume(vol);
         sink.append(source);
 
-        // Track the sink instead of detaching
+        // Track the sink so it stays alive
         if let Ok(mut sinks) = self.active_sinks.lock() {
             sinks.push_back(sink);
         } else {
+            // Fallback: detach so it at least plays
             sink.detach();
         }
 
