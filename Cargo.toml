@@ -14,6 +14,6 @@ dirs = "6"
 rfd = "0.15"
 
 [profile.release]
-opt-level = "s"
-lto = true
-strip = true
+opt-level = 2
+lto = false
+strip = false
