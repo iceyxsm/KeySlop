@@ -2,6 +2,7 @@ use crate::audio::{self, AudioPlayer};
 use crate::autostart;
 use crate::config::AppConfig;
 use crate::listener::{self, KeyMessage};
+use crate::tray::{AppTray, TrayMessage};
 use eframe::egui;
 use std::sync::mpsc;
 
@@ -15,8 +16,12 @@ pub struct KeySlopApp {
     capturing_key: bool,
     selected_key: Option<String>,
     filter_text: String,
-    /// Cached list of audio output devices.
     available_devices: Vec<String>,
+    tray: Option<AppTray>,
+    /// Whether the app should actually quit (vs just hide).
+    should_quit: bool,
+    /// Whether the window is currently visible.
+    window_visible: bool,
 }
 
 impl KeySlopApp {
@@ -24,7 +29,6 @@ impl KeySlopApp {
         let config = AppConfig::load();
         let available_devices = audio::list_output_devices();
 
-        // Try to use saved device, fall back to default
         let audio = if let Some(ref device_name) = config.audio_device {
             match AudioPlayer::with_device(device_name) {
                 Ok(player) => Some(player),
@@ -41,6 +45,14 @@ impl KeySlopApp {
 
         let key_rx = listener::start_listener();
 
+        let tray = match AppTray::new() {
+            Ok(t) => Some(t),
+            Err(e) => {
+                eprintln!("Failed to create tray icon: {}", e);
+                None
+            }
+        };
+
         Self {
             config,
             audio,
@@ -51,6 +63,9 @@ impl KeySlopApp {
             selected_key: None,
             filter_text: String::new(),
             available_devices,
+            tray,
+            should_quit: false,
+            window_visible: true,
         }
     }
 
@@ -93,7 +108,6 @@ impl KeySlopApp {
             match msg {
                 KeyMessage::KeyPressed(key_name) => {
                     self.last_key = key_name.clone();
-
                     if self.capturing_key {
                         self.selected_key = Some(key_name);
                         self.capturing_key = false;
@@ -110,14 +124,45 @@ impl KeySlopApp {
             }
         }
     }
+
+    fn process_tray_events(&mut self, ctx: &egui::Context) {
+        if let Some(ref tray) = self.tray {
+            while let Some(msg) = tray.poll() {
+                match msg {
+                    TrayMessage::Show => {
+                        self.window_visible = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    }
+                    TrayMessage::Quit => {
+                        self.should_quit = true;
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl eframe::App for KeySlopApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Process incoming key events
+        // Process events
         self.process_key_events();
+        self.process_tray_events(ctx);
 
-        // Request repaint to keep processing events
+        // Handle quit from tray
+        if self.should_quit {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+
+        // Intercept window close: hide instead of quit
+        if ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.window_visible = false;
+            return;
+        }
+
         ctx.request_repaint();
 
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
@@ -126,10 +171,14 @@ impl eframe::App for KeySlopApp {
                 ui.separator();
                 ui.label(format!("Last key: {}", self.last_key));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Quit button (actually quits)
+                    if ui.button("Quit").clicked() {
+                        self.should_quit = true;
+                    }
                     let toggle_text = if self.config.enabled {
-                        "🔊 Enabled"
+                        "Enabled"
                     } else {
-                        "🔇 Disabled"
+                        "Disabled"
                     };
                     if ui.button(toggle_text).clicked() {
                         self.config.enabled = !self.config.enabled;
@@ -142,6 +191,9 @@ impl eframe::App for KeySlopApp {
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label(&self.status_msg);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label("Close window to minimize to tray");
+                });
             });
         });
 
@@ -151,11 +203,7 @@ impl eframe::App for KeySlopApp {
                 ui.heading("Global Sound");
                 ui.label("Plays for any key that doesn't have a specific sound assigned.");
                 ui.horizontal(|ui| {
-                    let display = self
-                        .config
-                        .global_sound
-                        .as_deref()
-                        .unwrap_or("None");
+                    let display = self.config.global_sound.as_deref().unwrap_or("None");
                     ui.label(format!("Current: {}", display));
                     if ui.button("Browse...").clicked() {
                         if let Some(path) = Self::pick_sound_file() {
@@ -215,13 +263,11 @@ impl eframe::App for KeySlopApp {
                                     selected = Some(device.clone());
                                 }
                             }
-                            // Apply selection outside the borrow
                             if let Some(device_name) = selected {
-                                // We can't call self methods here, so store for later
                                 self.status_msg = format!("__switch_device:{}", device_name);
                             }
                         });
-                    if ui.button("🔄").on_hover_text("Refresh devices").clicked() {
+                    if ui.button("Refresh").on_hover_text("Refresh devices").clicked() {
                         self.refresh_devices();
                     }
                 });
@@ -284,7 +330,7 @@ impl eframe::App for KeySlopApp {
 
                 ui.horizontal(|ui| {
                     if self.capturing_key {
-                        ui.label("⌨ Press any key to select it...");
+                        ui.label("Press any key to select it...");
                         if ui.button("Cancel").clicked() {
                             self.capturing_key = false;
                         }
@@ -334,17 +380,16 @@ impl eframe::App for KeySlopApp {
                             let sound = &self.config.key_sounds[key];
                             ui.horizontal(|ui| {
                                 ui.monospace(format!("{:>15}", key));
-                                ui.label("→");
-                                // Show just the filename for readability
+                                ui.label(" -> ");
                                 let display_name = std::path::Path::new(sound)
                                     .file_name()
                                     .map(|f| f.to_string_lossy().into_owned())
                                     .unwrap_or_else(|| sound.clone());
                                 ui.label(&display_name);
-                                if ui.small_button("🗑").on_hover_text("Remove").clicked() {
+                                if ui.small_button("Remove").on_hover_text("Remove").clicked() {
                                     to_remove = Some(key.clone());
                                 }
-                                if ui.small_button("🔊").on_hover_text("Test").clicked() {
+                                if ui.small_button("Test").on_hover_text("Test sound").clicked() {
                                     if let Some(ref audio) = self.audio {
                                         if let Err(e) = audio.play(sound) {
                                             self.status_msg =

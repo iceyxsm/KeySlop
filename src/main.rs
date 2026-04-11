@@ -5,6 +5,7 @@ mod audio;
 mod autostart;
 mod config;
 mod listener;
+mod tray;
 
 use app::KeySlopApp;
 use eframe::egui;
@@ -14,7 +15,8 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([500.0, 600.0])
             .with_min_inner_size([400.0, 400.0])
-            .with_title("KeySlop"),
+            .with_title("KeySlop")
+            .with_close_button(true),
         ..Default::default()
     };
 
